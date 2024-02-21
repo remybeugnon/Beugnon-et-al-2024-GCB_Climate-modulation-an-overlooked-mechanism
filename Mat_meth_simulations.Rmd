@@ -1,0 +1,671 @@
+---
+title: "Supplement S1 - Simulations material and method"
+author: "Rémy Beugnon, Nolwenn Le Guyader, Alexandru Milcu, Jonathan Lenoir Jérémy Puissant, Xavier Morin, Stephan Hättenschwiler"
+date: "2023-11-08"
+output: pdf_document
+editor_options: 
+  markdown: 
+    wrap: 72
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+We performed modelling to illustrate the consequences of vegetation
+diversity effects on microclimate and their consequences for ecosystems
+functioning. In this example climate was simplified to temperature.
+
+First, we retrieved air temperature from a locality close to Jena
+(Germany) using ERA5 hourly data @copernicusclimatechangeservice.
+Second, using the model first from Huang et al. (2023), we predicted
+soil temperature for grassland field (with a diversity gradient: no
+plant, monoculture, polyculture of 60 plant species, [@huang2023]).
+Third, using the soil respiration - soil temperature relationship
+measured in grassland [@jones2006], we predicted soil respiration over
+time, for each microclimate driven by a specific level of diversity.
+
+```{r, include=FALSE, message=F, warning=F}
+knitr::opts_chunk$set(warning = F)
+knitr::opts_chunk$set(message = F)
+library(ggpubr)
+library(mgcv)
+library(zoo)
+library(readr)
+library(tidyverse)
+```
+
+```{r, echo=FALSE}
+sessionInfo()
+```
+
+# Data
+
+## Temperature data
+
+First, we retrieved the air temperature of Jena from the ERA5 hourly
+dataset @copernicusclimatechangeservice.
+
+```{r, results='hide' , message=F, warning=F}
+jena_data<-read_table("Jena_JEclimateStation.csv") # retrieving data
+air_temp_1=jena_data|> # renaming columns
+  mutate("utc_date"=`""utc_date""`)|>
+  mutate("utc_time"=`""utc_time""`)|>
+  mutate("airT"= `""T_air""`)|>
+  select(utc_date, utc_time, airT) #keeping only the columns of interest
+air_temp=air_temp_1|>
+  mutate("datetime"=
+           as.POSIXct(paste(air_temp_1$utc_date, air_temp_1$utc_time),
+                               format="%Y-%m-%d %H:%M:%S", tz="UTC"))|>
+  #merging date and time columns
+  select(datetime, airT)
+
+air_temp_data= air_temp|> # splitting the date information
+  # add months
+  mutate( month= format(as.Date(air_temp$datetime, 
+                                format="%d/%m/%Y"),"%m")) |>
+  # add hours
+  mutate( hour= format(as.POSIXct(air_temp$datetime, 
+                                  format="%d/%m/%Y %H"),"%H")) |>
+  #add seasons
+  mutate(season=if_else(month %in% c("09", "10", "11"), "autumn", 
+                        if_else(month %in% c("03", "04", "05"), "spring",
+                                if_else(month %in% c("06", "07", "08"),"summer",
+                                        "winter")))
+  )|>
+  mutate(year=year(datetime))|>
+  select(datetime, year, season,month, hour,  airT)
+```
+
+Air temperature data over time in Jena:
+
+```{r, echo=FALSE}
+head(air_temp_data)
+```
+
+Then, we used the Jena Experiment data [@huang2023] to determine the
+offset between air and soil temperature.
+
+```{r, reults='hide'}
+#get all the files in the project
+files=list.files()
+#select the digitalized for the offset between air and soil temperatures
+a_s_T=files[grepl("offset_air_soil", files)]
+seasons=str_sub(a_s_T, 17L, -5L)
+#Get the number of points per season
+L=a_s_T|>
+  map(read.csv)
+l=L|>
+  map(length(L[[1]]))
+l=l|>
+  map(length) #number of points for each season
+#create a data frame with all the seasons
+df_off_as=a_s_T|>
+  map_df(read.csv)
+df_off_as=df_off_as|>
+  #rename the two variables extracted on graph
+  rename("hour_of_day"="x","temp_offset"="y")|> 
+  #create a factor column season
+  mutate(season=as.factor(rep(seasons, l))) 
+
+#fitting a model for each level of diversity in function of the season
+fit_hour_offset_as = 
+  mgcv::gam(temp_offset ~ season + s(hour_of_day, by = season), 
+            data=df_off_as)
+
+air_soil_temp_offset<-function(hour, season){
+  pred_df = data.frame(hour_of_day = hour, season = season) #create a data frame
+  #in the same format as the one used for the predictions
+  mod=fit_hour_offset_as #selection of the model according to the diversity level
+  pred=predict(mod, newdata=pred_df) # prediction of the temperature offset
+  return (pred)
+}
+
+```
+
+Afterwards, we calculated the soil temperature corresponding to the air
+temperature.
+
+```{r, results='hide'}
+f_soilT<-function(airT, Dhour, season){ 
+  #air temperature, hour of the day and season given
+  offset_temp = as.vector(air_soil_temp_offset(as.numeric(Dhour), season))
+  soilT=airT+offset_temp #calculating the soil temperature 
+  return(soilT)
+}
+
+soilT=f_soilT(air_temp_data$airT, air_temp_data$hour, air_temp_data$season)
+#for each air temperature we got the soil temperature
+#adding soil temperature in the data frame
+air_soil_temp_data=cbind(air_temp_data, soilT) 
+```
+
+Air and soil temperatures data over time in Jena:
+
+```{r, echo=FALSE}
+head(air_soil_temp_data)
+```
+
+## Diversity effect on microclimate
+
+Based on [@huang2023], we determined the effect of diversity on the
+temperature.
+
+```{r, results='hide'}
+#get all the files in the project
+files=list.files()
+#select the digitalized for the Monoculture
+div1=files[grepl("div_1.csv", files)]
+#select the digitalized for the Polyculture
+div60=files[grepl("div_60.csv", files)]
+#create a vector with the four seasons
+seasons=str_sub(div1, 1L, -11L)
+#For the Monoculture (diversity of one species)
+#Get the number of points per season
+L.1=div1|>
+  purrr::map(read.csv)
+l1=L.1|>
+  purrr::map(length(L.1[[1]]))
+l1=l1|>
+  purrr::map(length) #number of points for each season
+#create a data frame with all the seasons
+df.1=div1|>
+  purrr::map_df(read.csv)
+df.1=df.1|>
+  #rename the two variables extracted on graph
+  rename("hour_of_day"="x","temp_offset"="y")|> 
+  #create a factor column season
+  mutate(season=as.factor(rep(seasons, l1)))|> 
+  #create a factor column diversity
+  mutate(diversity=as.factor(rep(1, nrow(df.1)))) 
+
+#For the Polyculture (diversity f 60 species)
+#Get the number of points per season
+L.60=div60|>
+  purrr::map(read.csv)
+l60=L.60|>
+  purrr::map(length(L.60[[1]]))
+l60=l60|>
+  purrr::map(length) #number of points for each season
+#create a data frame with all the seasons
+df.60=div60|>
+  purrr::map_df(read.csv)
+df.60=df.60|>
+  #rename the two variables extracted on graph
+  rename("hour_of_day"="x","temp_offset"="y")|> 
+  #create a factor column season
+  mutate(season=as.factor(rep(seasons, l60)))|> 
+  #create a factor column diversity
+  mutate(diversity=as.factor(rep(60, nrow(df.60)))) 
+
+#data frame with all the data
+df=rbind(df.1, df.60)
+#fitting a model for each level of diversity in function of the season
+fit_hour_offset=
+  purrr::map(list(df.1, df.60),
+      ~list(model = mgcv::gam(temp_offset~season+s(hour_of_day, by=season), 
+                              data=.x),
+            data = .x))
+#Function that gives the microclimate offset
+micro_temp_offset<-function(hour, season, diversity){
+  div=which(levels(df$diversity)==diversity) #getting the level of diversity to 
+  #select the right model in the list
+  pred_df=data.frame(hour_of_day=hour, season= season, diversity=diversity)
+  #in the same format as the one used for the predictions
+  mod=fit_hour_offset[[div]] #selection of the model according to the diversity level
+  pred=predict(mod$model, newdata=pred_df) # prediction of the temperature offset
+  return (pred)
+}
+#Function that gives the micro temperature for a given macrotemperature
+f_microT<-function(macroT, Dhour, season, div){
+  offset_temp = as.vector(micro_temp_offset(as.numeric(Dhour), season, div))
+  microT=macroT+offset_temp
+  return(microT)
+}
+
+#For the monoculture we have for temperature:
+div1= 1
+microT1=f_microT(air_soil_temp_data$soilT, 
+                 air_soil_temp_data$hour, 
+                 air_soil_temp_data$season, 
+                 div1)
+#For the polyculture we have for temperature:
+div60= 60
+microT60=f_microT(air_soil_temp_data$soilT, 
+                  air_soil_temp_data$hour, 
+                  air_soil_temp_data$season, 
+                  div60)
+
+#Data frame with the four different temperature at each time step
+all_temp_data=air_soil_temp_data|>
+  mutate(microT1=microT1)|>
+  mutate(microT60=microT60)
+```
+
+Air temperature (airT), soil temperature (soilT) and microtemperatures
+from a monoculture (microT1) and a polyculture (microT60) in Jena
+grassland:
+
+```{r, echo=FALSE}
+head(all_temp_data)
+```
+
+## Temperature-dependent ecosystem function: soil respiration
+
+From [@jones2006] we got the soil respiration in function of the soil
+temperature, which allows us to determine the soil respiration for each
+microclimate (bare soil, monoculture, polyculture).
+
+```{r, results='hide'}
+response_to_temperature <- function (temp, funct){ #temperature and the ecosystem
+                                                  #function chosen
+  df=data_frame(temperature= temp)
+  pred= predict(funct,df)
+  vpred=as.vector(pred)
+  return(vpred)
+}
+
+variable <- "soilresp" #variable that changes with temperature
+file<-paste0(variable, "_temp_data.csv") #name of the data files containing
+                                        #the value of the variable at given 
+                                        #temperatures
+tab_resp_temp<-read.csv(file) #creation of the data frame
+colnames(tab_resp_temp)<-c("temperature", variable) # changing the columns' names
+function_resp_temp<-gam(soilresp~s(temperature), data=tab_resp_temp)
+```
+
+Soil respiration (in $g\;CO_{2}.m^{-2}.h^{-1}$) in function of soil
+temperature (°C):
+
+```{r, echo=FALSE}
+head(tab_resp_temp)
+```
+
+# Prediction of ecosystem functioning for the different levels of diversity
+
+For each microclimate (bare soil, monoculture and polyculture), we
+predicted the soil respiration.
+
+```{r, results='hide', warning=F, message=F}
+# Getting the response to temperature corresponding to each temperature
+Lresp=purrr::map(list(all_temp_data$soilT,
+               all_temp_data$microT1, 
+               all_temp_data$microT60),  
+          ~response_to_temperature(.x, function_resp_temp))
+
+# adding them in a dataframe
+dfresp=as.data.frame(do.call(cbind, Lresp))
+#arrange the dataframe
+dfresp=dfresp|>
+  rename("soilrespsoilT"="V1", "soilrespmicroT1"="V2", "soilrespmicroT60"="V3")
+
+```
+
+We created a data frame containing all the data and for a few years
+only.
+
+```{r, results='hide'}
+#Add the respiration in the temperature dataframe
+df_resp_to_microclimate= bind_cols(all_temp_data, dfresp)
+df_resp_to_microclimate=df_resp_to_microclimate|>
+  arrange(datetime)|>
+  filter(!is.na(datetime))
+
+#Building a final table over three years starting in the growing season  
+df_resp_to_microclimate_growing= df_resp_to_microclimate |> 
+  # april is assimilated to the beginning of spring, i.e. the growing season 
+  filter(datetime>="2017-04-01")|> 
+  # calculating the cumulated respiration under 
+  # the soil temperature over the whole time period
+  mutate(cumsoilrespsoilT=cumsum(soilrespsoilT))|> 
+  # for the microtemperture of the monoculture
+  mutate(cumsoilrespmicroT1=cumsum(soilrespmicroT1))|> 
+  # for the microtemperture of the polyculture
+  mutate(cumsoilrespmicroT60=cumsum(soilrespmicroT60)) 
+```
+
+Final table gathering information about the date (datetime, year,
+season, month, hour), the temperatures (airT, soilT, microT1, microT60),
+the corresponding soil respirations (soilrespsoilT, soilrespmicroT1,
+soilrespmicroT60), and the corresponding cumulated soil respirations
+over the whole period considered (cumsoilrespsoilT, cumsoilrespmicroT1,
+cumsoilrespmicroT60):
+
+```{r, echo=FALSE}
+head(df_resp_to_microclimate_growing)
+```
+
+Then, we created a specific table to focus on the soil respiration over
+a month scale for the first year of data considered (2017-2018).
+
+```{r, results='hide'}
+# Respiration table for months scale
+df_resp_month=df_resp_to_microclimate_growing|>
+  filter(year=="2017"|
+           grepl("2018-03", datetime)|
+           grepl("2018-02", datetime)|
+           grepl("2018-01", datetime))|> #keeping the first year of data
+  group_by(month(datetime))|> #grouping by months
+  rename("mt"="month(datetime)")|>
+    #taking for each respiration the monthly mean and the 5% and 95% quantiles
+  summarise(mmaT=mean(soilrespsoilT), 
+            mmiT1=mean(soilrespmicroT1), 
+            mmiT60=mean(soilrespmicroT60),
+            fqmaT=quantile(soilrespsoilT, probs = 0.05), 
+            fqmiT1=quantile(soilrespmicroT1, probs =0.05),
+            fqmiT60=quantile(soilrespmicroT60, probs = 0.05),
+            lqmaT=quantile(soilrespsoilT, probs =  0.95), 
+            lqmiT1=quantile(soilrespmicroT1, probs =0.95),
+            lqmiT60=quantile(soilrespmicroT60, probs = 0.95))
+```
+
+```{r, echo=FALSE}
+head(df_resp_month)
+```
+
+Similarly, we created a specific table to focus on the soil respiration
+over over a years scale.
+
+```{r, results='hide'}
+Lyear=c("2017","2018","2019")
+
+# Respiration table for years scale
+L_resp_year=map(.x=Lyear, #for each year
+       .f=~
+         (df_resp_to_microclimate_growing|>
+  filter(year==.x)|>
+  group_by(month(datetime))|> #grouping by months
+    # getting the mean monthly respiration and the quantiles at 5% and 95%
+  rename("mt"="month(datetime)")|> 
+  summarise(
+    mmaT=mean(soilrespsoilT), 
+    mmiT1=mean(soilrespmicroT1), 
+    mmiT60=mean(soilrespmicroT60),
+    fqmaT=median(soilrespsoilT[soilrespsoilT>=
+                                 quantile(soilrespsoilT, probs=0.95)]), 
+    fqmiT1=median(soilrespmicroT1[soilrespmicroT1>=
+                                    quantile(soilrespmicroT1, probs=0.95)]),
+    fqmiT60=median(soilrespmicroT60[soilrespmicroT60>=
+                                      quantile(soilrespmicroT60, probs=0.95)]),
+    lqmaT=median(soilrespsoilT[soilrespsoilT<=
+                                 quantile(soilrespsoilT, probs=0.05)]), 
+    lqmiT1=median(soilrespmicroT1[soilrespmicroT1<=
+                                    quantile(soilrespmicroT1, probs=0.05)]),
+    lqmiT60=median(soilrespmicroT60[soilrespmicroT60<=
+                                      quantile(soilrespmicroT60, probs=0.05)])
+    )|>
+  mutate(year=.x)) #adding a year variable
+       )
+df_resp_year=as.data.frame(do.call(rbind, L_resp_year))
+
+df_resp_year=df_resp_year|>
+  unite(datetime, c("year", "mt"), sep="-") # uniting by date
+
+#removing the first line that is wrongly assess as the 31st of March
+df_resp_year=df_resp_year[-1,] 
+
+df_resp_year=df_resp_year|>
+  mutate(datetime=as.Date(as.yearmon(datetime))) #creating a month year variable
+
+```
+
+```{r, echo=FALSE}
+head(df_resp_year)
+```
+
+# Plots
+
+```{r}
+my_theme<- theme_classic()+theme(axis.line.x = element_line(size=2), 
+                                 axis.line.y=element_line(size=2),
+        axis.text.x = element_text(size=14), axis.text.y=element_text(size=14),
+        axis.title.x = element_text(size=15), axis.title.y=element_text(size=15))
+```
+
+## The macroclimate in function of time
+
+```{r}
+macroclimate=ggplot(data=df_resp_to_microclimate_growing|>
+                      filter(grepl("2019-06-10|2019-06-11|2019-06-12|2019-06-13|2019-06-14", 
+                                   datetime)))+
+            geom_line(aes(x=datetime, y=airT), 
+                      size=3, colour="black")+
+  scale_x_datetime(name="Time (days)", date_breaks="2 days",
+                    labels=c("0", "1", "3", "5", "6")
+                     )+
+  ylab("Air temperature (°C)")+
+  my_theme
+
+macroclimate
+
+```
+
+## The effect of diversity on the microclimate
+
+```{r, message=F}
+div_eff=ggplot(data=df_resp_to_microclimate_growing)+
+  geom_smooth(aes(x=airT, y=soilT, colour="Bare soil"), 
+              se=FALSE, size=2, linetype=2)+
+  geom_smooth(aes(x=airT, y=microT1, colour="Monoculture"), 
+              se=FALSE, size=3)+
+  geom_smooth(aes(x=airT, y=microT60, colour="Polyculture"), 
+              se=FALSE, size=3)+
+  scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                      name="Microclimate",
+                      breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+  xlab("Air temperature (°C)")+
+  ylab("Micro temperature (°C)")+
+  my_theme
+div_eff
+```
+
+## Microclimate simulation
+
+```{r}
+
+micro_sim=ggplot(data=df_resp_to_microclimate_growing|>
+                   filter(grepl("2019-06-10|2019-06-11|2019-06-12|2019-06-13|2019-06-14", 
+                                datetime)))+
+  geom_line(aes(x=datetime, y=soilT, colour="Bare soil"), size=3)+
+  geom_line(aes(x=datetime, y=microT1, colour="Monoculture"), size=3)+
+  geom_line(aes(x=datetime, y=microT60, colour="Polyculture"), size=3)+
+    scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                      name="Microclimate",
+                      breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+   scale_x_datetime(name="Time (days)", date_breaks="2 days",
+                    labels=c("0", "1", "3", "5", "6")
+                     )+
+  ylab("Micro temperature (°C)")+
+  my_theme
+micro_sim
+```
+
+## Soil respiration in function of the temperature
+
+```{r, message=F}
+clim_dep_f=ggplot(data=tab_resp_temp)+
+  geom_smooth(aes(x=temperature, y=soilresp), se=FALSE, size=3, colour="black")+
+  xlab("Soil temperature(°C)")+
+  ylab(bquote('Soil respiration (g'*~CO[2]~ '.'~m^-2~ '.' ~h^-1*')'))+
+  my_theme
+clim_dep_f
+```
+
+## Ecosystem functioning: soil respiration over time
+
+```{r}
+ecos_funct=ggplot(data=df_resp_to_microclimate_growing|>
+                    filter(grepl("2019-06-10|2019-06-11|2019-06-12|2019-06-13|2019-06-14", 
+                                 datetime)))+
+  geom_line(aes(x=datetime, y=soilrespsoilT, colour="Bare soil"), size=3)+
+  geom_line(aes(x=datetime, y=soilrespmicroT1, colour="Monoculture"), size=3)+
+  geom_line(aes(x=datetime, y=soilrespmicroT60, colour="Polyculture"), size=3)+
+  scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                      name="Microclimate",
+                      breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+   scale_x_datetime(name="Time (days)", date_breaks="2 days",
+                    labels=c("0", "1", "3", "5", "6")
+                     )+
+  ylab(bquote('Soil respiration (g'*~CO[2]~ '.'~m^-2~ '.' ~h^-1*')'))+
+  my_theme
+ecos_funct
+
+```
+
+## Soil respiration across time scale in function of diversity: temporal an cumulative functions (Figure 3)
+
+```{r}
+my_theme2<- theme_classic()+theme(axis.line.x = element_line(size=1), 
+                                  axis.line.y=element_line(size=1),
+        axis.text.x = element_text(size=7.5), axis.text.y=element_text(size=7.5),
+        axis.title.x = element_text(size=9), axis.title.y=element_text(size=9))
+```
+
+### Time series of temperature
+
+```{r, results='hide'}
+ #Hours scale 
+soilRh=ggplot(data = df_resp_to_microclimate_growing|>filter(grepl("2017-04-01", 
+                                                                   datetime))) + 
+  geom_smooth( aes(x = hour(datetime), y = soilrespsoilT, colour="Bare soil"), 
+               se=FALSE, size=2) +
+  geom_smooth(aes(x = hour(datetime), y = soilrespmicroT1, colour="Monoculture"), 
+              se=FALSE, size=2) + 
+  geom_smooth(aes(x = hour(datetime), y = soilrespmicroT60, colour="Polyculture"), 
+              se=FALSE, size=2) +
+   ylab(bquote(atop("Soil respiration",'(g'*~CO[2]*'.'*~m^-2*'.' *~h^-1*')')))+
+  scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                       name="Microclimate",
+                     breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+  scale_x_continuous(breaks = c(1,6,12,18,24))+
+  scale_y_continuous(limits=c(0, 1.5))+
+  my_theme2+
+  theme(axis.title.x=element_blank(),
+        legend.position = "none"
+        
+)
+
+
+# Months scale
+
+soilRd=ggplot(data = df_resp_month) + 
+  geom_line( aes(x = mt, y = mmaT, colour="Bare soil"), size=2) +
+  geom_line(aes(x = mt, y = mmiT1, colour="Monoculture"), size=2) +
+  geom_line(aes(x = mt, y = mmiT60, colour="Polyculture"), size=2)+
+   scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                       name="Microclimate",
+                       breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+  scale_x_continuous(breaks = c(1, 6.0, 12.0), labels=c("Apr.", "Oct.", "Mar."))+
+  scale_y_continuous(limits=c(0,2.2))+
+  my_theme2+
+  theme(axis.title.x=element_blank(),
+        axis.title.y=element_blank(),
+        legend.position = "none"
+)
+
+# Years scale
+
+soilRy=ggplot(data = df_resp_year) + 
+  geom_line( aes(x = datetime, y = mmaT, colour="Bare soil"), size=2) +
+  geom_line(aes(x = datetime, y = mmiT1, colour="Monoculture"), size=2) +
+  geom_line(aes(x = datetime, y = mmiT60, colour="Polyculture"), size=2)+
+  scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                      name="Microclimate",
+                      breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+  scale_y_continuous(limits=c(0, 2.5))+
+  expand_limits(x = as.Date(c("2017-04-01", "2019-12-31")))+
+  my_theme2+
+  theme(axis.title.x=element_blank(), 
+        axis.title.y=element_blank(),
+        legend.position = "none"
+)
+```
+
+### Cumulative soil respiration over time
+
+```{r, results='hide'}
+
+#Hours scale 
+
+soilCh=ggplot(data=df_resp_to_microclimate_growing|>filter(grepl("2017-04-01", 
+                                                                 datetime)))+
+  geom_smooth(aes(x=hour(datetime), y=cumsoilrespsoilT, colour="Bare soil"), 
+              se=FALSE, size=2)+
+  geom_smooth(aes(x=hour(datetime), y=cumsoilrespmicroT1, colour="Monoculture"), 
+              se=FALSE, size=2)+
+  geom_smooth(aes(x=hour(datetime), y=cumsoilrespmicroT60, colour="Polyculture"), 
+              se=FALSE, size=2) +
+  ylab(bquote(atop("Cumulative soil respiration",'(g'*~CO[2]*'.'*~m^-2*')')))+
+  xlab("Hours")+
+  scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                      name="Microclimate",
+                     breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+  scale_x_continuous(breaks = c(1,6,12,18,24))+
+  scale_y_continuous(limits=c(0,25), 
+                     breaks=c(0, 5, 10, 15, 20,25), 
+                     labels=c(0,5,10,15,20,25))+
+  my_theme2+
+  theme(
+        legend.position = "none"
+)
+
+
+#Months scale
+
+soilCd=ggplot(data=df_resp_to_microclimate_growing|>
+  filter(year=="2017"|
+           grepl("2018-03", datetime)|
+           grepl("2018-02", datetime)|
+           grepl("2018-01", datetime)))+
+  geom_smooth(aes(x=datetime, y=cumsoilrespsoilT, colour="Bare soil"), 
+              se=FALSE, size=2)+
+  geom_smooth(aes(x=datetime, y=cumsoilrespmicroT1, colour="Monoculture"), 
+              se=FALSE, size=2)+
+  geom_smooth(aes(x=datetime, y=cumsoilrespmicroT60, colour="Polyculture"), 
+              se=FALSE, size=2) +
+   scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                       name="Microclimate",
+                       breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+  scale_x_continuous(breaks = ymd_hms("2017-04-01 01:00:00", 
+                                      "2017-10-04 01:00:00", 
+                                      "2018-03-31 01:00:00"),
+                     labels=c("Apr.", "Oct.", "Mar."), name="Months")+
+  scale_y_continuous(labels = scales::label_number_si())+
+  my_theme2+
+  theme(
+        axis.title.y=element_blank(),
+        legend.position = "none")
+
+
+#Years scale
+
+soilCy=ggplot(data=df_resp_to_microclimate_growing)+
+  geom_smooth(aes(x=datetime, y=cumsoilrespsoilT, colour="Bare soil"), 
+              se=FALSE, size=2)+
+  geom_smooth(aes(x=datetime, y=cumsoilrespmicroT1, colour="Monoculture"), 
+              se=FALSE, size=2)+
+  geom_smooth(aes(x=datetime, y=cumsoilrespmicroT60, colour="Polyculture"), 
+              se=FALSE, size=2) +
+  scale_colour_manual(values=c("#87531D", "#87BD64", "#225104"), 
+                      name="Microclimate",
+                      breaks=c("Bare soil", "Monoculture", "Polyculture"))+
+ xlab("Years")+
+  scale_y_continuous(labels = scales::label_number_si(), limits=c(0,25000))+
+my_theme2+
+  theme(
+        axis.title.y=element_blank(),
+        legend.position = "none")
+
+```
+
+### The 6 plots combined
+
+```{r, message=F, warning=F}
+t_c_f=ggarrange(soilRh, soilRd, soilRy, soilCh, soilCd, soilCy, 
+                nrow=2, ncol=3, align="hv", common.legend = TRUE, 
+                legend="bottom")
+t_c_f
+```
+
+# References
