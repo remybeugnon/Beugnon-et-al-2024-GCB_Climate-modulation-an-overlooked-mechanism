@@ -4,6 +4,6 @@ Authors: RÃ©my Beugnon, Nolwenn Le Guyader, Alexandru Milcu, Jonathan Lenoir, JÃ
 
 Journal: Global Change Biology
 
-DOI: TBA
+DOI: [https://doi.org/10.1111/gcb.17214](https://doi.org/10.1111/gcb.17214)
 
 Description: This folder contains all scripts used to build the models and figures of this paper.
